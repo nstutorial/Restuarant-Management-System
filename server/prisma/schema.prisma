@@ -64,6 +64,7 @@ model Branch {
   timezone       String             @default("Asia/Kolkata")
   currency       String             @default("INR")
   taxRate        Decimal            @default(5) @db.Decimal(5, 2)
+  printFormat    String             @default("THERMAL")
   logoData       String?            @db.Text
   address        String?
   phone          String?

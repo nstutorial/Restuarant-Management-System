@@ -371,6 +371,7 @@ app.get('/api/menu', requireSession, requireBranchPermission('menu.read'), async
 const menuItemInput = z.object({
     branchId: z.string().min(1), categoryId: z.string().min(1), name: z.string().trim().min(2).max(160),
     description: z.string().trim().max(1000).default(''), price: moneyText, emoji: z.string().max(16).default('🍽️'),
+    imageData: z.string().max(1_500_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value), 'Choose a valid PNG, JPG, or WebP image.'),
     sku: z.string().trim().max(64).optional(),
 });
 const canManageMenu = (request, branchId) => {
@@ -404,7 +405,7 @@ app.post('/api/menu/items', requireSameOrigin, requireSession, async (request, r
         const category = await prisma.menuCategory.findFirst({ where: { id: input.categoryId, branchId: input.branchId } });
         if (!category)
             return response.status(400).json({ error: { code: 'INVALID_CATEGORY', message: 'Choose a category from this branch.' } });
-        const item = await prisma.menuItem.create({ data: { branchId: input.branchId, categoryId: category.id, name: input.name, description: input.description, price: new Prisma.Decimal(input.price), emoji: input.emoji, sku: input.sku || null }, include: { category: true } });
+        const item = await prisma.menuItem.create({ data: { branchId: input.branchId, categoryId: category.id, name: input.name, description: input.description, price: new Prisma.Decimal(input.price), emoji: input.emoji, imageData: input.imageData || null, sku: input.sku || null }, include: { category: true } });
         await prisma.auditLog.create({ data: { branchId: input.branchId, userId: auth.user.id, action: 'MENU_ITEM_CREATED', details: { itemId: item.id, name: item.name } } });
         response.status(201).json({ item });
     }
@@ -413,7 +414,7 @@ app.post('/api/menu/items', requireSameOrigin, requireSession, async (request, r
     }
 });
 app.patch('/api/menu/items/:id', requireSameOrigin, requireSession, async (request, response, next) => {
-    const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(160).optional(), description: z.string().trim().max(1000).optional(), price: moneyText.optional(), emoji: z.string().max(16).optional(), categoryId: z.string().min(1).optional(), available: z.boolean().optional() }).safeParse(request.body);
+    const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(160).optional(), description: z.string().trim().max(1000).optional(), price: moneyText.optional(), emoji: z.string().max(16).optional(), imageData: z.string().max(1_500_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value), 'Choose a valid PNG, JPG, or WebP image.'), categoryId: z.string().min(1).optional(), available: z.boolean().optional() }).safeParse(request.body);
     if (!parsed.success)
         return response.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check the menu item changes.' } });
     try {
@@ -1007,14 +1008,14 @@ app.get('/api/branch/config', requireSession, async (request, response, next) =>
 catch (error) {
     next(error);
 } });
-app.patch('/api/settings/branch', requireSameOrigin, requireSession, async (request, response, next) => { const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(120), timezone: z.string().trim().min(1).max(80), currency: z.string().trim().length(3), taxRate: z.string().regex(/^\d{1,2}(?:\.\d{1,2})?$/).refine(value => Number(value) <= 30), logoData: z.string().max(2_200_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)), address: z.string().trim().max(500).nullable().optional(), phone: z.string().trim().max(40).nullable().optional(), email: z.union([z.string().trim().email().max(254), z.literal('')]).nullable().optional() }).safeParse(request.body); if (!parsed.success)
-    return response.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check branch details, contact information, and uploaded logo.' } }); try {
+app.patch('/api/settings/branch', requireSameOrigin, requireSession, async (request, response, next) => { const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(120), timezone: z.string().trim().min(1).max(80), currency: z.string().trim().length(3), taxRate: z.string().regex(/^\d{1,2}(?:\.\d{1,2})?$/).refine(value => Number(value) <= 30), printFormat: z.enum(['THERMAL', 'A4']).optional(), logoData: z.string().max(2_200_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)), address: z.string().trim().max(500).nullable().optional(), phone: z.string().trim().max(40).nullable().optional(), email: z.union([z.string().trim().email().max(254), z.literal('')]).nullable().optional() }).safeParse(request.body); if (!parsed.success)
+    return response.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check branch details, print format, contact information, and uploaded logo.' } }); try {
     const auth = request.auth;
     const membership = branchMembership(request, parsed.data.branchId);
     if (!membership || !rolePermissions[membership.role].includes('settings.manage'))
         return response.status(403).json({ error: { code: 'PERMISSION_DENIED', message: 'You cannot edit branch settings.' } });
-    const branch = await prisma.branch.update({ where: { id: parsed.data.branchId }, data: { name: parsed.data.name, timezone: parsed.data.timezone, currency: parsed.data.currency.toUpperCase(), taxRate: new Prisma.Decimal(parsed.data.taxRate), ...(parsed.data.logoData !== undefined ? { logoData: parsed.data.logoData } : {}), ...(parsed.data.address !== undefined ? { address: parsed.data.address || null } : {}), ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone || null } : {}), ...(parsed.data.email !== undefined ? { email: parsed.data.email || null } : {}) } });
-    await prisma.auditLog.create({ data: { branchId: branch.id, userId: auth.user.id, action: 'BRANCH_SETTINGS_UPDATED', details: { timezone: branch.timezone, currency: branch.currency, taxRate: branch.taxRate.toString(), logoUpdated: parsed.data.logoData !== undefined, contactDetailsUpdated: parsed.data.address !== undefined || parsed.data.phone !== undefined || parsed.data.email !== undefined } } });
+    const branch = await prisma.branch.update({ where: { id: parsed.data.branchId }, data: { name: parsed.data.name, timezone: parsed.data.timezone, currency: parsed.data.currency.toUpperCase(), taxRate: new Prisma.Decimal(parsed.data.taxRate), ...(parsed.data.printFormat !== undefined ? { printFormat: parsed.data.printFormat } : {}), ...(parsed.data.logoData !== undefined ? { logoData: parsed.data.logoData } : {}), ...(parsed.data.address !== undefined ? { address: parsed.data.address || null } : {}), ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone || null } : {}), ...(parsed.data.email !== undefined ? { email: parsed.data.email || null } : {}) } });
+    await prisma.auditLog.create({ data: { branchId: branch.id, userId: auth.user.id, action: 'BRANCH_SETTINGS_UPDATED', details: { timezone: branch.timezone, currency: branch.currency, taxRate: branch.taxRate.toString(), printFormat: branch.printFormat, logoUpdated: parsed.data.logoData !== undefined, contactDetailsUpdated: parsed.data.address !== undefined || parsed.data.phone !== undefined || parsed.data.email !== undefined } } });
     response.json({ branch });
 }
 catch (error) {
