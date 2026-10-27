@@ -1,0 +1,575 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+  QUICK_BILL
+  DELIVERY
+}
+
+enum OrderStatus {
+  DRAFT
+  PLACED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum StaffRole {
+  OWNER
+  MANAGER
+  CASHIER
+  WAITER
+  KITCHEN
+  DELIVERY
+  INVENTORY
+  ACCOUNTANT
+}
+
+model Restaurant {
+  id        String   @id @default(cuid())
+  name      String
+  title     String   @default("Restaurant Management")
+  createdAt DateTime @default(now())
+  branches  Branch[]
+}
+
+model Branch {
+  id             String             @id @default(cuid())
+  restaurantId   String
+  name           String
+  timezone       String             @default("Asia/Kolkata")
+  currency       String             @default("INR")
+  taxRate        Decimal            @default(5) @db.Decimal(5, 2)
+  logoData       String?            @db.Text
+  address        String?
+  phone          String?
+  email          String?
+  createdAt      DateTime           @default(now())
+  restaurant     Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  categories     MenuCategory[]
+  items          MenuItem[]
+  orders         Order[]
+  customers      Customer[]
+  inventoryItems InventoryItem[]
+  units          InventoryUnit[]
+  suppliers      Supplier[]
+  purchaseOrders PurchaseOrder[]
+  expenses       Expense[]
+  expenseCategories ExpenseCategory[]
+  supplierPayments SupplierPayment[]
+  tables         DiningTable[]
+  memberships    BranchMembership[]
+  cashSessions   CashSession[]
+  bills          Bill[]
+  auditLogs      AuditLog[]
+  tableSessions  TableSession[]
+
+  @@unique([restaurantId, name])
+  @@index([restaurantId])
+}
+
+model MenuCategory {
+  id        String     @id @default(cuid())
+  branchId  String
+  name      String
+  sortOrder Int        @default(0)
+  branch    Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  items     MenuItem[]
+
+  @@unique([branchId, name])
+  @@index([branchId, sortOrder])
+}
+
+model MenuItem {
+  id          String        @id @default(cuid())
+  branchId    String
+  categoryId  String?
+  name        String
+  description String        @default("")
+  price       Decimal       @db.Decimal(12, 2)
+  sku         String?
+  emoji       String        @default("🍽️")
+  imageData   String?       @db.Text
+  available   Boolean       @default(true)
+  charges     Json          @default("[]")
+  deletedAt   DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  branch      Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  category    MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  orderItems  OrderItem[]
+  recipeLines MenuRecipeLine[]
+
+  @@unique([branchId, sku])
+  @@index([branchId, available, deletedAt])
+  @@index([categoryId])
+}
+
+model DiningTable {
+  id              String         @id @default(cuid())
+  branchId        String
+  number          String
+  seats           Int            @default(2)
+  status          String         @default("AVAILABLE")
+  branch          Branch         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  serviceSessions TableSession[]
+
+  @@unique([branchId, number])
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  branchId  String
+  name      String
+  phone     String?
+  email     String?
+  notes     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  orders    Order[]
+
+  @@unique([branchId, phone])
+  @@index([branchId, name])
+}
+
+model InventoryItem {
+  id            String              @id @default(cuid())
+  branchId      String
+  name          String
+  category      String              @default("General")
+  unit          String              @default("pcs")
+  quantity      Decimal             @default(0) @db.Decimal(14, 3)
+  reorderLevel  Decimal             @default(0) @db.Decimal(14, 3)
+  unitCost      Decimal             @default(0) @db.Decimal(12, 2)
+  active        Boolean             @default(true)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  branch        Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  movements     StockMovement[]
+  purchaseItems PurchaseOrderItem[]
+  recipeLines   MenuRecipeLine[]
+
+  @@unique([branchId, name])
+  @@index([branchId, active])
+}
+
+model InventoryUnit {
+  id        String   @id @default(cuid())
+  branchId  String
+  name      String
+  createdAt DateTime @default(now())
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  @@unique([branchId, name])
+  @@index([branchId])
+}
+
+model StockMovement {
+  id              String        @id @default(cuid())
+  inventoryItemId String
+  type            String
+  quantity        Decimal       @db.Decimal(14, 3)
+  reason          String
+  reference       String?
+  createdAt       DateTime      @default(now())
+  item            InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@index([inventoryItemId, createdAt])
+}
+
+model MenuRecipeLine {
+  id              String        @id @default(cuid())
+  menuItemId      String
+  inventoryItemId String
+  quantity        Decimal       @db.Decimal(14, 3)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  menuItem        MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@unique([menuItemId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model Supplier {
+  id             String          @id @default(cuid())
+  branchId       String
+  name           String
+  contactName    String?
+  phone          String?
+  email          String?
+  address        String?
+  openingBalance Decimal         @default(0) @db.Decimal(12, 2)
+  active         Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  branch         Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  purchaseOrders PurchaseOrder[]
+  expenses       Expense[]
+  payments       SupplierPayment[]
+
+  @@unique([branchId, name])
+  @@index([branchId, active])
+}
+
+model PurchaseOrder {
+  id         String              @id @default(cuid())
+  number     Int                 @default(autoincrement())
+  branchId   String
+  supplierId String
+  status     String              @default("DRAFT")
+  reference  String?
+  notes      String              @default("")
+  createdAt  DateTime            @default(now())
+  receivedAt DateTime?
+  branch     Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier   Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  items      PurchaseOrderItem[]
+
+  @@unique([branchId, number])
+  @@index([branchId, status, createdAt])
+}
+
+model PurchaseOrderItem {
+  id               String        @id @default(cuid())
+  purchaseOrderId  String
+  inventoryItemId  String
+  orderedQuantity  Decimal       @db.Decimal(14, 3)
+  receivedQuantity Decimal       @default(0) @db.Decimal(14, 3)
+  unitCost         Decimal       @db.Decimal(12, 2)
+  taxRate          Decimal       @default(0) @db.Decimal(5, 2)
+  unit             String        @default("pcs")
+  unitFactor       Decimal       @default(1) @db.Decimal(14, 6)
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  inventoryItem    InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@unique([purchaseOrderId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model SupplierPayment {
+  id            String   @id @default(cuid())
+  branchId      String
+  supplierId    String
+  amount        Decimal  @db.Decimal(12, 2)
+  paymentMethod String   @default("BANK")
+  reference     String?
+  notes         String   @default("")
+  paidAt        DateTime @default(now())
+  createdAt     DateTime @default(now())
+  branch        Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier      Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  @@index([branchId, supplierId, paidAt])
+}
+
+model Expense {
+  id          String    @id @default(cuid())
+  branchId    String
+  supplierId  String?
+  category    String
+  description String
+  amount      Decimal   @db.Decimal(12, 2)
+  paymentMethod String  @default("CASH")
+  expenseDate DateTime  @default(now())
+  notes       String    @default("")
+  createdAt   DateTime  @default(now())
+  branch      Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier    Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, expenseDate])
+}
+
+model ExpenseCategory {
+  id        String   @id @default(cuid())
+  branchId  String
+  name      String
+  createdAt DateTime @default(now())
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  @@unique([branchId, name])
+  @@index([branchId])
+}
+
+model DeliveryAssignment {
+  id            String                  @id @default(cuid())
+  orderId       String                  @unique
+  staffId       String?
+  status        String                  @default("UNASSIGNED")
+  assignedAt    DateTime?
+  deliveredAt   DateTime?
+  failedReason  String?
+  trackingToken String                  @unique @default(cuid())
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  order         Order                   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  staff         User?                   @relation("DeliveryStaff", fields: [staffId], references: [id], onDelete: SetNull)
+  history       DeliveryStatusHistory[]
+
+  @@index([staffId, status])
+}
+
+model DeliveryStatusHistory {
+  id           String             @id @default(cuid())
+  assignmentId String
+  status       String
+  note         String             @default("")
+  createdAt    DateTime           @default(now())
+  assignment   DeliveryAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@index([assignmentId, createdAt])
+}
+
+model Order {
+  id                   String              @id @default(cuid())
+  number               Int                 @default(autoincrement())
+  branchId             String
+  tableId              String?
+  tableSessionId       String?
+  customerId           String?
+  deliveryPhone        String?
+  deliveryAddress      String?
+  deliveryInstructions String?
+  deliveryFee          Decimal             @default(0) @db.Decimal(12, 2)
+  type                 OrderType
+  status               OrderStatus         @default(DRAFT)
+  paymentStatus        PaymentStatus       @default(UNPAID)
+  customerName         String              @default("Walk-in Guest")
+  notes                String              @default("")
+  subtotal             Decimal             @db.Decimal(12, 2)
+  taxAmount            Decimal             @db.Decimal(12, 2)
+  discount             Decimal             @default(0) @db.Decimal(12, 2)
+  total                Decimal             @db.Decimal(12, 2)
+  idempotencyKey       String              @unique
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  branch               Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  table                DiningTable?        @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  tableSession         TableSession?       @relation(fields: [tableSessionId], references: [id], onDelete: SetNull)
+  customer             Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  items                OrderItem[]
+  payments             Payment[]
+  refunds              Refund[]
+  bill                 Bill?
+  auditLogs            AuditLog[]
+  deliveryAssignment   DeliveryAssignment?
+
+  @@index([branchId, createdAt])
+  @@index([branchId, status, createdAt])
+}
+
+model TableSession {
+  id           String            @id @default(cuid())
+  branchId     String
+  tableId      String
+  status       String            @default("OPEN")
+  customerName String            @default("Walk-in Guest")
+  startedAt    DateTime          @default(now())
+  closedAt     DateTime?
+  branch       Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  table        DiningTable       @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  orders       Order[]
+  bill         TableSessionBill?
+
+  @@index([branchId, status, startedAt])
+  @@index([tableId, status])
+}
+
+model TableSessionBill {
+  id            String       @id @default(cuid())
+  sessionId     String       @unique
+  number        Int          @default(autoincrement())
+  issuedAt      DateTime     @default(now())
+  printCount    Int          @default(0)
+  lastPrintedAt DateTime?
+  session       TableSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  @@unique([number])
+}
+
+model OrderItem {
+  id         String    @id @default(cuid())
+  orderId    String
+  menuItemId String?
+  itemName   String
+  quantity   Int
+  unitPrice  Decimal   @db.Decimal(12, 2)
+  lineTotal  Decimal   @db.Decimal(12, 2)
+  taxRate    Decimal   @default(5) @db.Decimal(5, 2)
+  notes      String    @default("")
+  order      Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem   MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  orderId        String
+  method         PaymentMethod
+  amount         Decimal       @db.Decimal(12, 2)
+  cashReceived   Decimal?      @db.Decimal(12, 2)
+  changeGiven    Decimal?      @db.Decimal(12, 2)
+  reference      String?
+  idempotencyKey String?       @unique
+  verified       Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  recordedById   String?
+  cashSessionId  String?
+  order          Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  recordedBy     User?         @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+  cashSession    CashSession?  @relation(fields: [cashSessionId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+}
+
+model Refund {
+  id            String        @id @default(cuid())
+  orderId       String
+  amount        Decimal       @db.Decimal(12, 2)
+  method        PaymentMethod @default(CASH)
+  reason        String
+  recordedById  String?
+  cashSessionId String?
+  createdAt     DateTime      @default(now())
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  recordedBy    User?         @relation("RefundRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+  cashSession   CashSession?  @relation(fields: [cashSessionId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+  @@index([cashSessionId, createdAt])
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  name                String
+  email               String               @unique
+  phone               String?
+  passwordHash        String
+  active              Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  memberships         BranchMembership[]
+  sessions            Session[]
+  payments            Payment[]            @relation("PaymentRecorder")
+  refunds             Refund[]             @relation("RefundRecorder")
+  cashSessions        CashSession[]
+  auditLogs           AuditLog[]
+  deliveryAssignments DeliveryAssignment[] @relation("DeliveryStaff")
+
+  @@index([active])
+}
+
+model CashSession {
+  id             String         @id @default(cuid())
+  branchId       String
+  openedById     String
+  closedById     String?
+  openingFloat   Decimal        @db.Decimal(12, 2)
+  closingCount   Decimal?       @db.Decimal(12, 2)
+  expectedCash   Decimal?       @db.Decimal(12, 2)
+  variance       Decimal?       @db.Decimal(12, 2)
+  varianceReason String?
+  openedAt       DateTime       @default(now())
+  closedAt       DateTime?
+  branch         Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  openedBy       User           @relation(fields: [openedById], references: [id], onDelete: Restrict)
+  payments       Payment[]
+  refunds        Refund[]
+  movements      CashMovement[]
+
+  @@index([branchId, closedAt, openedAt])
+}
+
+model CashMovement {
+  id        String      @id @default(cuid())
+  sessionId String
+  type      String
+  amount    Decimal     @db.Decimal(12, 2)
+  reason    String
+  createdAt DateTime    @default(now())
+  session   CashSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  @@index([sessionId, createdAt])
+}
+
+model Bill {
+  id            String    @id @default(cuid())
+  branchId      String
+  orderId       String    @unique
+  number        Int       @default(autoincrement())
+  issuedAt      DateTime  @default(now())
+  printCount    Int       @default(0)
+  lastPrintedAt DateTime?
+  branch        Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  order         Order     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([branchId, number])
+  @@index([branchId, issuedAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  branchId  String
+  userId    String?
+  orderId   String?
+  action    String
+  details   Json?
+  createdAt DateTime @default(now())
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, createdAt])
+  @@index([orderId, createdAt])
+}
+
+model BranchMembership {
+  id        String    @id @default(cuid())
+  userId    String
+  branchId  String
+  role      StaffRole
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch    Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, branchId])
+  @@index([branchId, role])
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}

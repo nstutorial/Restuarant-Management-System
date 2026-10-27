@@ -1,0 +1,1 @@
+ALTER TYPE "OrderType" ADD VALUE 'QUICK_BILL';

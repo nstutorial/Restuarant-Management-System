@@ -1,0 +1,1 @@
+ALTER TABLE "Branch" ADD COLUMN "address" TEXT, ADD COLUMN "phone" TEXT, ADD COLUMN "email" TEXT;

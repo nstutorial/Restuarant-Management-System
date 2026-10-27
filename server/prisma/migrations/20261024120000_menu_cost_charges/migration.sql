@@ -1,0 +1,1 @@
+ALTER TABLE "MenuItem" ADD COLUMN "charges" JSONB NOT NULL DEFAULT '[]'::jsonb;

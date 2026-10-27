@@ -1,0 +1,13 @@
+{
+  "installCommand": "npm install && npm run db:generate",
+  "buildCommand": "npm run build",
+  "outputDirectory": "client/dist",
+  "functions": {
+    "api/[...path].ts": {
+      "includeFiles": "server/prisma/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/[...path]" }
+  ]
+}

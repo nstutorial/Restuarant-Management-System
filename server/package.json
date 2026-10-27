@@ -1,0 +1,6 @@
+{
+  "name": "restaurant-management-server",
+  "private": true,
+  "type": "module",
+  "scripts": {"seed": "tsx prisma/seed.ts"}
+}
