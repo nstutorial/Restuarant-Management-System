@@ -1,0 +1,1 @@
+ALTER TABLE "Branch" ADD COLUMN "deliveryOriginLat" DOUBLE PRECISION, ADD COLUMN "deliveryOriginLon" DOUBLE PRECISION;

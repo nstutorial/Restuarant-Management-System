@@ -4,20 +4,26 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\" \"npm:dev:customer\"",
     "dev:client": "vite --config client/vite.config.ts",
     "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -b && vite build --config client/vite.config.ts",
     "build:server": "tsc -p server/tsconfig.json",
     "db:generate": "prisma generate --schema server/prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema server/prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema server/prisma/schema.prisma",
     "db:seed": "prisma db seed --schema server/prisma/schema.prisma",
     "db:studio": "prisma studio --schema server/prisma/schema.prisma",
     "preview": "vite preview --config client/vite.config.ts",
-    "test:integration": "tsx --test server/src/index.test.ts"
+    "test:integration": "tsx --test server/src/index.test.ts",
+    "dev:customer": "vite --config apps/customer/vite.config.ts",
+    "build:customer": "tsc -p apps/customer/tsconfig.json && vite build --config apps/customer/vite.config.ts",
+    "build:customer:vercel": "tsc -p apps/customer/tsconfig.json && vite build --config apps/customer/vercel.vite.config.ts"
   },
   "dependencies": {
+    "@types/leaflet": "^1.9.22",
     "bcryptjs": "^3.0.2",
+    "leaflet": "^1.9.4",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",

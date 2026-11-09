@@ -67,6 +67,8 @@ model Branch {
   printFormat    String             @default("THERMAL")
   logoData       String?            @db.Text
   address        String?
+  deliveryOriginLat Float?
+  deliveryOriginLon Float?
   phone          String?
   email          String?
   createdAt      DateTime           @default(now())
@@ -154,9 +156,37 @@ model Customer {
   updatedAt DateTime @updatedAt
   branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
   orders    Order[]
+  portalAccount CustomerPortalAccount?
 
   @@unique([branchId, phone])
   @@index([branchId, name])
+}
+
+model CustomerPortalAccount {
+  id           String   @id @default(cuid())
+  customerId   String   @unique
+  email        String   @unique
+  passwordHash String
+  cart         Json     @default("[]")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sessions     CustomerPortalSession[]
+
+  @@index([active, createdAt])
+}
+
+model CustomerPortalSession {
+  id        String   @id @default(cuid())
+  accountId String
+  tokenHash String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  account   CustomerPortalAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, expiresAt])
 }
 
 model InventoryItem {
@@ -355,6 +385,7 @@ model Order {
   deliveryPhone        String?
   deliveryAddress      String?
   deliveryInstructions String?
+  deliveryDistanceKm  Decimal?            @db.Decimal(7, 2)
   deliveryFee          Decimal             @default(0) @db.Decimal(12, 2)
   type                 OrderType
   status               OrderStatus         @default(DRAFT)
@@ -381,6 +412,7 @@ model Order {
 
   @@index([branchId, createdAt])
   @@index([branchId, status, createdAt])
+  @@index([customerId, createdAt])
 }
 
 model TableSession {

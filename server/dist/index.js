@@ -18,6 +18,7 @@ if (process.env.DATABASE_URL) {
     }
     catch { /* Prisma will report malformed database URLs on first use. */ }
 }
+// Uses the standard PostgreSQL connection URL from DATABASE_URL.
 const prisma = new PrismaClient();
 const moneyText = z.string().regex(/^\d+(?:\.\d{1,2})?$/);
 const orderTax = (lines, discount, deliveryFee, defaultRate) => {
@@ -44,6 +45,28 @@ const loginAttempts = new Map();
 const branchEventStreams = new Map();
 const sessionLifetimeMs = 30 * 24 * 60 * 60_000;
 const sessionRefreshWindowMs = 7 * 24 * 60 * 60_000;
+const customerSessionLifetimeMs = 30 * 24 * 60 * 60_000;
+const customerSessionCookie = (token, maxAge = Math.floor(customerSessionLifetimeMs / 1000)) => `customer_session=${encodeURIComponent(token)}; HttpOnly; SameSite=None; Path=/api/customer; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
+async function requireCustomerSession(request, response, next) {
+    const token = cookieValue(request, 'customer_session');
+    if (!token)
+        return response.status(401).json({ error: { message: 'Sign in to continue.' } });
+    try {
+        const session = await prisma.customerPortalSession.findUnique({ where: { tokenHash: tokenDigest(token) }, include: { account: { include: { customer: true } } } });
+        if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.account.active)
+            return response.status(401).json({ error: { message: 'Your customer session expired. Sign in again.' } });
+        if (session.expiresAt.getTime() - Date.now() < 7 * 24 * 60 * 60_000) {
+            const expiresAt = new Date(Date.now() + customerSessionLifetimeMs);
+            await prisma.customerPortalSession.update({ where: { id: session.id }, data: { expiresAt } });
+            response.setHeader('Set-Cookie', customerSessionCookie(token));
+        }
+        request.customerAuth = { accountId: session.account.id, customerId: session.account.customerId, name: session.account.customer.name, email: session.account.email, phone: session.account.customer.phone };
+        next();
+    }
+    catch (error) {
+        next(error);
+    }
+}
 function publishBranchEvent(branchId, event, data = {}) {
     const streams = branchEventStreams.get(branchId);
     if (!streams)
@@ -77,6 +100,10 @@ function sameOrigin(request) {
             if (requestOrigin.origin === 'http://localhost:5173' && requestHost === 'localhost:4000')
                 return true;
             if (requestOrigin.origin === 'http://127.0.0.1:5173' && requestHost === '127.0.0.1:4000')
+                return true;
+            if (requestOrigin.origin === 'http://localhost:5174' && requestHost === 'localhost:4000')
+                return true;
+            if (requestOrigin.origin === 'http://127.0.0.1:5174' && (requestHost === '127.0.0.1:4000' || requestHost === 'localhost:4000'))
                 return true;
         }
         catch { /* Reject malformed origins below. */ }
@@ -133,6 +160,20 @@ function requireBranchPermission(permission) {
     };
 }
 app.disable('x-powered-by');
+app.use((request, response, next) => {
+    const allowedOrigin = process.env.CUSTOMER_PORTAL_ORIGIN;
+    const origin = request.get('origin');
+    if (allowedOrigin && origin === allowedOrigin) {
+        response.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+        response.setHeader('Access-Control-Allow-Credentials', 'true');
+        response.setHeader('Vary', 'Origin');
+        response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key');
+        response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+        if (request.method === 'OPTIONS')
+            return response.sendStatus(204);
+    }
+    next();
+});
 app.use(express.json({ limit: '3mb' }));
 app.get('/api/events', requireSession, (request, response) => {
     const branchId = String(request.query.branchId ?? '');
@@ -161,6 +202,188 @@ app.get('/api/health', async (_request, response) => {
     }
     catch {
         response.status(503).json({ status: 'degraded', database: 'disconnected', service: 'restaurant-management-api' });
+    }
+});
+// Public customer menu and referrer-restricted browser map key for the shareable /order storefront.
+app.get('/api/public/storefront', async (request, response, next) => {
+    const branchId = String(request.query.branchId ?? process.env.DEMO_BRANCH_ID ?? 'demo-indiranagar');
+    try {
+        const branch = await prisma.branch.findUnique({ where: { id: branchId }, include: { restaurant: true, categories: { orderBy: { sortOrder: 'asc' } } } });
+        if (!branch)
+            return response.status(404).json({ error: { message: 'Restaurant was not found.' } });
+        const items = await prisma.menuItem.findMany({ where: { branchId, available: true, deletedAt: null }, include: { category: true }, orderBy: [{ category: { sortOrder: 'asc' } }, { name: 'asc' }] });
+        response.json({ branch: { id: branch.id, name: branch.name, address: branch.address, deliveryOriginLat: branch.deliveryOriginLat, deliveryOriginLon: branch.deliveryOriginLon, phone: branch.phone, restaurant: { name: branch.restaurant.name }, taxRate: branch.taxRate }, categories: branch.categories.map(category => category.name), items });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+const publicOrderAttempts = new Map();
+const publicAuthAttempts = new Map();
+function customerAuthRateLimited(ip) {
+    const attempt = publicAuthAttempts.get(ip);
+    if (attempt && attempt.resetAt > Date.now() && attempt.count >= 12)
+        return true;
+    const current = attempt && attempt.resetAt > Date.now() ? attempt : { count: 0, resetAt: Date.now() + 15 * 60_000 };
+    publicAuthAttempts.set(ip, { count: current.count + 1, resetAt: current.resetAt });
+    return false;
+}
+app.post('/api/customer/register', requireSameOrigin, async (request, response, next) => {
+    if (customerAuthRateLimited(request.ip ?? 'unknown'))
+        return response.status(429).json({ error: { message: 'Too many attempts. Please wait a little and try again.' } });
+    const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254), password: z.string().min(10).max(256), phone: z.string().trim().min(7).max(40), address: z.string().trim().min(8).max(500), landmark: z.string().trim().min(2).max(150) }).safeParse(request.body);
+    if (!parsed.success)
+        return response.status(400).json({ error: { message: 'Enter your name, a valid email, password (10+ characters), mobile and full delivery address.' } });
+    try {
+        const input = parsed.data, email = input.email.toLowerCase();
+        const branch = await prisma.branch.findUnique({ where: { id: input.branchId }, select: { id: true } });
+        if (!branch)
+            return response.status(404).json({ error: { message: 'Restaurant was not found.' } });
+        const token = randomBytes(32).toString('base64url'), expiresAt = new Date(Date.now() + customerSessionLifetimeMs);
+        const account = await prisma.$transaction(async (tx) => {
+            if (await tx.customerPortalAccount.findUnique({ where: { email } }))
+                throw new Error('CUSTOMER_EMAIL_EXISTS');
+            let customer = await tx.customer.findFirst({ where: { branchId: input.branchId, phone: input.phone } });
+            if (!customer)
+                customer = await tx.customer.create({ data: { branchId: input.branchId, name: input.name, phone: input.phone } });
+            const created = await tx.customerPortalAccount.create({ data: { customerId: customer.id, email, passwordHash: await hash(input.password, 12) }, include: { customer: true } });
+            await tx.customer.update({ where: { id: customer.id }, data: { name: input.name, phone: input.phone, notes: `Landmark: ${input.landmark}` } });
+            await tx.customerPortalSession.create({ data: { accountId: created.id, tokenHash: tokenDigest(token), expiresAt } });
+            return created;
+        });
+        response.setHeader('Set-Cookie', customerSessionCookie(token));
+        response.status(201).json({ customer: { id: account.customerId, name: input.name, email, phone: input.phone } });
+    }
+    catch (error) {
+        if (error instanceof Error && error.message === 'CUSTOMER_EMAIL_EXISTS')
+            return response.status(409).json({ error: { message: 'An account with this email already exists. Sign in instead.' } });
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')
+            return response.status(409).json({ error: { message: 'An account with these details already exists. Sign in or check your phone number.' } });
+        next(error);
+    }
+});
+app.post('/api/customer/login', requireSameOrigin, async (request, response, next) => {
+    if (customerAuthRateLimited(request.ip ?? 'unknown'))
+        return response.status(429).json({ error: { message: 'Too many attempts. Please wait a little and try again.' } });
+    const parsed = z.object({ email: z.string().trim().email().max(254), password: z.string().min(1).max(256) }).safeParse(request.body);
+    if (!parsed.success)
+        return response.status(400).json({ error: { message: 'Enter a valid email and password.' } });
+    try {
+        const account = await prisma.customerPortalAccount.findUnique({ where: { email: parsed.data.email.toLowerCase() }, include: { customer: true } });
+        if (!account || !account.active || !(await compare(parsed.data.password, account.passwordHash)))
+            return response.status(401).json({ error: { message: 'Email or password is incorrect.' } });
+        const token = randomBytes(32).toString('base64url');
+        await prisma.customerPortalSession.create({ data: { accountId: account.id, tokenHash: tokenDigest(token), expiresAt: new Date(Date.now() + customerSessionLifetimeMs) } });
+        response.setHeader('Set-Cookie', customerSessionCookie(token));
+        response.json({ customer: { id: account.customer.id, name: account.customer.name, email: account.email, phone: account.customer.phone } });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.get('/api/customer/me', requireCustomerSession, (request, response) => {
+    const customer = request.customerAuth;
+    response.json({ customer: { id: customer.customerId, name: customer.name, email: customer.email, phone: customer.phone } });
+});
+app.get('/api/customer/cart', requireCustomerSession, async (request, response, next) => {
+    const auth = request.customerAuth;
+    try {
+        const account = await prisma.customerPortalAccount.findUnique({ where: { id: auth.accountId }, select: { cart: true } });
+        response.json({ items: Array.isArray(account?.cart) ? account.cart : [] });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.put('/api/customer/cart', requireSameOrigin, requireCustomerSession, async (request, response, next) => {
+    const auth = request.customerAuth;
+    const parsed = z.object({ items: z.array(z.object({ menuItemId: z.string().min(1), quantity: z.number().int().min(1).max(20) })).max(30) }).safeParse(request.body);
+    if (!parsed.success)
+        return response.status(400).json({ error: { message: 'Cart can contain up to 30 dishes, with up to 20 of each.' } });
+    try {
+        const unique = new Map(parsed.data.items.map(item => [item.menuItemId, item]));
+        const items = [...unique.values()];
+        const account = await prisma.customerPortalAccount.findUnique({ where: { id: auth.accountId }, select: { customer: { select: { branchId: true } } } });
+        if (!account)
+            return response.status(401).json({ error: { message: 'Sign in again to save your cart.' } });
+        const available = await prisma.menuItem.findMany({ where: { branchId: account.customer.branchId, id: { in: items.map(item => item.menuItemId) }, available: true, deletedAt: null }, select: { id: true } });
+        if (available.length !== items.length)
+            return response.status(400).json({ error: { message: 'A dish in your cart is no longer available. Refresh the menu.' } });
+        await prisma.customerPortalAccount.update({ where: { id: auth.accountId }, data: { cart: items } });
+        response.json({ items });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.post('/api/customer/logout', requireSameOrigin, async (request, response, next) => {
+    const token = cookieValue(request, 'customer_session');
+    try {
+        if (token)
+            await prisma.customerPortalSession.updateMany({ where: { tokenHash: tokenDigest(token), revokedAt: null }, data: { revokedAt: new Date() } });
+        response.setHeader('Set-Cookie', customerSessionCookie('', 0));
+        response.json({ ok: true });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.get('/api/customer/orders', requireCustomerSession, async (request, response, next) => {
+    const auth = request.customerAuth;
+    const branchId = String(request.query.branchId ?? process.env.DEMO_BRANCH_ID ?? 'demo-indiranagar');
+    try {
+        const orders = await prisma.order.findMany({ where: { customerId: auth.customerId, branchId, type: OrderType.DELIVERY }, select: { number: true, createdAt: true, status: true, total: true, deliveryFee: true, deliveryDistanceKm: true, deliveryAddress: true, items: { select: { itemName: true, quantity: true, lineTotal: true } } }, orderBy: { createdAt: 'desc' }, take: 30 });
+        response.json({ orders });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.post('/api/customer/orders', requireSameOrigin, requireCustomerSession, async (request, response, next) => {
+    const customerAuth = request.customerAuth;
+    const ip = request.ip ?? 'unknown';
+    const attempt = publicOrderAttempts.get(ip);
+    if (attempt && attempt.resetAt > Date.now() && attempt.count >= 12)
+        return response.status(429).json({ error: { message: 'Too many order attempts. Please try again shortly.' } });
+    const parsed = z.object({ branchId: z.string().min(1), phone: z.string().trim().min(7).max(40), address: z.string().trim().min(8).max(500), landmark: z.string().trim().min(2).max(150), instructions: z.string().trim().max(500).optional(), deliveryFee: moneyText, distanceKm: z.number().min(0).max(40), items: z.array(z.object({ menuItemId: z.string().min(1), quantity: z.number().int().min(1).max(20) })).min(1).max(30) }).safeParse(request.body);
+    if (!parsed.success)
+        return response.status(400).json({ error: { message: 'Enter a valid phone number and full delivery address, then add menu items.' } });
+    const input = parsed.data;
+    try {
+        const branch = await prisma.branch.findUnique({ where: { id: input.branchId }, select: { id: true, taxRate: true, address: true, deliveryOriginLat: true, deliveryOriginLon: true } });
+        if (!branch)
+            return response.status(404).json({ error: { message: 'Restaurant was not found.' } });
+        if (!branch.address?.trim() && (branch.deliveryOriginLat == null || branch.deliveryOriginLon == null))
+            return response.status(400).json({ error: { message: 'Restaurant delivery origin is not configured yet. Please call the restaurant to order.' } });
+        const accountCustomer = await prisma.customer.findUnique({ where: { id: customerAuth.customerId }, select: { id: true, branchId: true } });
+        if (!accountCustomer || accountCustomer.branchId !== input.branchId)
+            return response.status(403).json({ error: { message: 'Your customer account is not connected to this restaurant.' } });
+        const products = await prisma.menuItem.findMany({ where: { branchId: input.branchId, id: { in: input.items.map(item => item.menuItemId) }, available: true, deletedAt: null } });
+        if (products.length !== new Set(input.items.map(item => item.menuItemId)).size)
+            return response.status(400).json({ error: { message: 'A selected dish is no longer available. Refresh the menu and try again.' } });
+        const byId = new Map(products.map(product => [product.id, product]));
+        const lines = input.items.map(item => { const product = byId.get(item.menuItemId); return { menuItemId: product.id, itemName: product.name, quantity: item.quantity, unitPrice: product.price, lineTotal: product.price.mul(item.quantity), taxRate: new Prisma.Decimal(branch.taxRate), notes: '' }; });
+        const subtotal = lines.reduce((sum, line) => sum.add(line.lineTotal), new Prisma.Decimal(0));
+        const calculatedDistance = Math.ceil(input.distanceKm * 2) / 2;
+        if (calculatedDistance > 20)
+            return response.status(400).json({ error: { message: 'This address is outside the 20 km delivery area.' } });
+        const expectedFee = Math.max(25, Math.round(calculatedDistance * 12));
+        if (Math.abs(Number(input.deliveryFee) - expectedFee) > 0.01)
+            return response.status(400).json({ error: { message: 'Delivery charge changed. Please refresh the distance estimate and retry.' } });
+        const deliveryFee = new Prisma.Decimal(expectedFee.toFixed(2));
+        const taxAmount = orderTax(lines, new Prisma.Decimal(0), deliveryFee, new Prisma.Decimal(branch.taxRate));
+        const customer = await prisma.customer.update({ where: { id: customerAuth.customerId }, data: { phone: input.phone } });
+        const key = `web-${randomBytes(18).toString('hex')}`;
+        const order = await prisma.order.create({ data: { branchId: input.branchId, type: OrderType.DELIVERY, customerId: customer.id, customerName: customerAuth.name, deliveryPhone: input.phone, deliveryAddress: `${input.address} · Landmark: ${input.landmark}`, deliveryInstructions: input.instructions ?? '', deliveryDistanceKm: new Prisma.Decimal(calculatedDistance.toFixed(2)), deliveryFee, status: OrderStatus.PLACED, subtotal, taxAmount, discount: new Prisma.Decimal(0), total: subtotal.add(deliveryFee).add(taxAmount), idempotencyKey: key, items: { create: lines }, deliveryAssignment: { create: { status: 'UNASSIGNED' } } }, select: { number: true, total: true, createdAt: true } });
+        const current = attempt && attempt.resetAt > Date.now() ? attempt : { count: 0, resetAt: Date.now() + 15 * 60_000 };
+        publicOrderAttempts.set(ip, { count: current.count + 1, resetAt: current.resetAt });
+        publishBranchEvent(input.branchId, 'orders.changed', { orderNumber: order.number });
+        response.status(201).json({ order: { number: order.number, total: order.total, createdAt: order.createdAt } });
+    }
+    catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')
+            return response.status(409).json({ error: { message: 'This phone number could not be saved. Please check it and retry.' } });
+        next(error);
     }
 });
 app.get('/api/auth/setup-status', async (_request, response, next) => {
@@ -1008,14 +1231,14 @@ app.get('/api/branch/config', requireSession, async (request, response, next) =>
 catch (error) {
     next(error);
 } });
-app.patch('/api/settings/branch', requireSameOrigin, requireSession, async (request, response, next) => { const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(120), timezone: z.string().trim().min(1).max(80), currency: z.string().trim().length(3), taxRate: z.string().regex(/^\d{1,2}(?:\.\d{1,2})?$/).refine(value => Number(value) <= 30), printFormat: z.enum(['THERMAL', 'A4']).optional(), logoData: z.string().max(2_200_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)), address: z.string().trim().max(500).nullable().optional(), phone: z.string().trim().max(40).nullable().optional(), email: z.union([z.string().trim().email().max(254), z.literal('')]).nullable().optional() }).safeParse(request.body); if (!parsed.success)
-    return response.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check branch details, print format, contact information, and uploaded logo.' } }); try {
+app.patch('/api/settings/branch', requireSameOrigin, requireSession, async (request, response, next) => { const parsed = z.object({ branchId: z.string().min(1), name: z.string().trim().min(2).max(120), timezone: z.string().trim().min(1).max(80), currency: z.string().trim().length(3), taxRate: z.string().regex(/^\d{1,2}(?:\.\d{1,2})?$/).refine(value => Number(value) <= 30), printFormat: z.enum(['THERMAL', 'A4']).optional(), logoData: z.string().max(2_200_000).nullable().optional().refine(value => value == null || /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)), address: z.string().trim().max(500).nullable().optional(), deliveryOriginLat: z.number().min(-90).max(90).nullable().optional(), deliveryOriginLon: z.number().min(-180).max(180).nullable().optional(), phone: z.string().trim().max(40).nullable().optional(), email: z.union([z.string().trim().email().max(254), z.literal('')]).nullable().optional() }).refine(value => (value.deliveryOriginLat == null) === (value.deliveryOriginLon == null), { message: 'Set both delivery origin coordinates together.' }).safeParse(request.body); if (!parsed.success)
+    return response.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Check branch details, delivery origin coordinates, print format, contact information, and uploaded logo.' } }); try {
     const auth = request.auth;
     const membership = branchMembership(request, parsed.data.branchId);
     if (!membership || !rolePermissions[membership.role].includes('settings.manage'))
         return response.status(403).json({ error: { code: 'PERMISSION_DENIED', message: 'You cannot edit branch settings.' } });
-    const branch = await prisma.branch.update({ where: { id: parsed.data.branchId }, data: { name: parsed.data.name, timezone: parsed.data.timezone, currency: parsed.data.currency.toUpperCase(), taxRate: new Prisma.Decimal(parsed.data.taxRate), ...(parsed.data.printFormat !== undefined ? { printFormat: parsed.data.printFormat } : {}), ...(parsed.data.logoData !== undefined ? { logoData: parsed.data.logoData } : {}), ...(parsed.data.address !== undefined ? { address: parsed.data.address || null } : {}), ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone || null } : {}), ...(parsed.data.email !== undefined ? { email: parsed.data.email || null } : {}) } });
-    await prisma.auditLog.create({ data: { branchId: branch.id, userId: auth.user.id, action: 'BRANCH_SETTINGS_UPDATED', details: { timezone: branch.timezone, currency: branch.currency, taxRate: branch.taxRate.toString(), printFormat: branch.printFormat, logoUpdated: parsed.data.logoData !== undefined, contactDetailsUpdated: parsed.data.address !== undefined || parsed.data.phone !== undefined || parsed.data.email !== undefined } } });
+    const branch = await prisma.branch.update({ where: { id: parsed.data.branchId }, data: { name: parsed.data.name, timezone: parsed.data.timezone, currency: parsed.data.currency.toUpperCase(), taxRate: new Prisma.Decimal(parsed.data.taxRate), ...(parsed.data.printFormat !== undefined ? { printFormat: parsed.data.printFormat } : {}), ...(parsed.data.logoData !== undefined ? { logoData: parsed.data.logoData } : {}), ...(parsed.data.address !== undefined ? { address: parsed.data.address || null } : {}), ...(parsed.data.deliveryOriginLat !== undefined ? { deliveryOriginLat: parsed.data.deliveryOriginLat, deliveryOriginLon: parsed.data.deliveryOriginLon ?? null } : {}), ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone || null } : {}), ...(parsed.data.email !== undefined ? { email: parsed.data.email || null } : {}) } });
+    await prisma.auditLog.create({ data: { branchId: branch.id, userId: auth.user.id, action: 'BRANCH_SETTINGS_UPDATED', details: { timezone: branch.timezone, currency: branch.currency, taxRate: branch.taxRate.toString(), printFormat: branch.printFormat, logoUpdated: parsed.data.logoData !== undefined, contactDetailsUpdated: parsed.data.address !== undefined || parsed.data.phone !== undefined || parsed.data.email !== undefined, deliveryOriginUpdated: parsed.data.deliveryOriginLat !== undefined } } });
     response.json({ branch });
 }
 catch (error) {

@@ -1,0 +1,15 @@
+{
+  "installCommand": "npm install && npm run db:generate",
+  "buildCommand": "npm run build:customer",
+  "outputDirectory": "dist/customer",
+  "functions": {
+    "api/[...path].ts": {
+      "includeFiles": "server/prisma/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/[...path]" },
+    { "source": "/customer/(.*)", "destination": "/index.html" },
+    { "source": "/order", "destination": "/index.html" }
+  ]
+}

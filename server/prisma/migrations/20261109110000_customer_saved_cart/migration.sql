@@ -1,0 +1,1 @@
+ALTER TABLE "CustomerPortalAccount" ADD COLUMN "cart" JSONB NOT NULL DEFAULT '[]';
