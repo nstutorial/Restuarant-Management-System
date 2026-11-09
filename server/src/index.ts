@@ -311,7 +311,7 @@ app.post('/api/customer/logout', requireSameOrigin, async (request, response, ne
 });
 app.get('/api/customer/orders', requireCustomerSession, async (request, response, next) => {
   const auth = (request as CustomerAuthRequest).customerAuth!;
-  const branchId = String(request.query.branchId ?? process.env.DEMO_BRANCH_ID ?? 'demo-indiranagar');
+  const branchId = String(request.query.branchId || process.env.DEMO_BRANCH_ID || 'demo-indiranagar');
   try {
     const records = await prisma.order.findMany({ where: { customerId: auth.customerId, branchId, type: OrderType.DELIVERY }, select: { number: true, createdAt: true, status: true, total: true, deliveryFee: true, deliveryDistanceKm: true, deliveryAddress: true, deliveryAssignment: { select: { status: true, updatedAt: true, staff: { select: { name: true, phone: true } }, history: { select: { status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' } } } }, items: { select: { itemName: true, quantity: true, lineTotal: true } } }, orderBy: { createdAt: 'desc' }, take: 30 });
     const orders = records.map(order => ({ ...order, deliveryAssignment: order.deliveryAssignment ? { ...order.deliveryAssignment, staff: ['PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(order.deliveryAssignment.status) ? order.deliveryAssignment.staff : null } : null }));
