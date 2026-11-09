@@ -171,6 +171,7 @@ app.use((request, response, next) => {
 app.use(express.json({ limit: '3mb' }));
 
 app.get('/api/events', requireSession, (request, response) => {
+  if (process.env.VERCEL === '1') return response.sendStatus(204);
   const branchId = String(request.query.branchId ?? '');
   const membership = branchMembership(request, branchId);
   if (!membership || !rolePermissions[membership.role].some(permission => ['tables.read', 'orders.read', 'kitchen.read'].includes(permission))) {
@@ -263,6 +264,7 @@ app.get('/api/customer/me', requireCustomerSession, (request, response) => {
   response.json({ customer: { id: customer.customerId, name: customer.name, email: customer.email, phone: customer.phone } });
 });
 app.get('/api/customer/events', requireCustomerSession, (request, response) => {
+  if (process.env.VERCEL === '1') return response.sendStatus(204);
   const customerId = (request as CustomerAuthRequest).customerAuth!.customerId;
   response.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   response.flushHeaders();
